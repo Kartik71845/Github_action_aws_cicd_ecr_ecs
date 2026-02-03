@@ -1,46 +1,69 @@
 name: GitHub Actions CI/CD Pipeline
 
-env:
-    ACCOUNT_ID: 647800544853
-    AWS_REGION: us-east-1
-    ECR_REPO: my-ecr-repo
-    ECS_CLUSTER: my-ecs-cluster
-    ECS_SERVICE: my-ecs-service
-
 permissions:
   contents: read
   id-token: write
+
+env:
+  ACCOUNT_ID: 647800544853
+  AWS_REGION: us-east-1
+  ECR_REPO: my-ecr-repo
+  ECS_CLUSTER: my-ecs-cluster
+  ECS_SERVICE: my-ecs-service
+  TASK_FAMILY: my-task-family
+
 on:
-  push: 
+  push:
     branches:
       - main
 
 jobs:
-  build:
-    runs-on: ubuntu:latest
+  deploy:
+    runs-on: ubuntu-latest
+
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
+
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::${env.ACCOUNT_ID}:role/github_actions_role
-          aws-region: ${{env.AWS_REGION}}
+          role-to-assume: arn:aws:iam::${{ env.ACCOUNT_ID }}:role/github_actions_role
+          aws-region: ${{ env.AWS_REGION }}
+
       - name: Login to Amazon ECR
-        uses: aws-actions/amazon-ecr-login@v1
-    
-      - name: Build ,tag and push the image
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and Push Docker Image
         run: |
-            docker build -t ${{env.ECR_REPO}}:latest .
-            docker tag ${{env.ECR_REPO}}:latest ${{env.ACCOUNT_ID}}.dkr.ecr.${{env.AWS_REGION}}.amazonaws.com/${{env.ECR_REPO}}:latest
-            docker push ${{env.ACCOUNT_ID}}.dkr.ecr.${{env.AWS_REGION}}.amazonaws.com/${{env.ECR_REPO}}:latest 
-        
-      - name: Register new ecs Task Definition
+          docker build -t ${{ env.ECR_REPO }}:latest .
+          docker tag ${{ env.ECR_REPO }}:latest \
+            ${{ env.ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPO }}:latest
+          docker push \
+            ${{ env.ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPO }}:latest
+
+      - name: Register new ECS task definition
         run: |
-            TASK_DEFINITION=$(aws ecs describe-task-definition --task-definition ${{env.ECS_SERVICE}} --query "taskDefinition")
-            --cli-input-json file://<(echo $TASK_DEFINITION | jq --arg IMAGE "${{env.ACCOUNT_ID}}.dkr.ecr.${{env.AWS_REGION}}.amazonaws.com/${{env.ECR_REPO}}:latest" '.containerDefinitions[0].image=$IMAGE' )
-            --query "taskDefinition.taskDefinitionArn" --output text)
-            
-      - name: update ecs service
+          aws ecs register-task-definition \
+            --family ${{ env.TASK_FAMILY }} \
+            --network-mode awsvpc \
+            --requires-compatibilities FARGATE \
+            --cpu "256" \
+            --memory "512" \
+            --container-definitions '[
+              {
+                "name": "app",
+                "image": "'"${{ env.ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPO }}:latest"'",
+                "essential": true,
+                "portMappings": [
+                  { "containerPort": 3000 }
+                ]
+              }
+            ]'
+
+      - name: Update ECS service
         run: |
-          aws ecs update-service --cluster ${{env.ECS_CLUSTER}} --service ${{env.ECS_SERVICE}} --task-definition $TASK_DEFINITION
+          aws ecs update-service \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --service ${{ env.ECS_SERVICE }} \
+            --force-new-deployment
