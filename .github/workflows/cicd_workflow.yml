@@ -11,6 +11,8 @@ env:
   ECS_CLUSTER: my-ecs-cluster
   ECS_SERVICE: my-ecs-service
   TASK_FAMILY: my-task-family
+  ECS_EXECUTION_ROLE_ARN: arn:aws:iam::647800544853:role/ecsTaskExecutionRole
+  ECS_TASK_ROLE_ARN: arn:aws:iam::647800544853:role/ecsTaskRole
 
 on:
   push:
@@ -36,34 +38,46 @@ jobs:
 
       - name: Build and Push Docker Image
         run: |
-          docker build -t ${{ env.ECR_REPO }}:latest .
-          docker tag ${{ env.ECR_REPO }}:latest \
-            ${{ env.ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPO }}:latest
-          docker push \
-            ${{ env.ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPO }}:latest
+          IMAGE_URI=${{ env.ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPO }}:latest
+          docker build -t "$IMAGE_URI" .
+          docker push "$IMAGE_URI"
 
       - name: Register new ECS task definition
         run: |
-          aws ecs register-task-definition \
-            --family ${{ env.TASK_FAMILY }} \
-            --network-mode awsvpc \
-            --requires-compatibilities FARGATE \
-            --cpu "256" \
-            --memory "512" \
-            --container-definitions '[
+          IMAGE_URI=${{ env.ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPO }}:latest
+          cat <<JSON > taskdef.json
+          {
+            "family": "${{ env.TASK_FAMILY }}",
+            "networkMode": "awsvpc",
+            "requiresCompatibilities": ["FARGATE"],
+            "cpu": "256",
+            "memory": "512",
+            "executionRoleArn": "${{ env.ECS_EXECUTION_ROLE_ARN }}",
+            "taskRoleArn": "${{ env.ECS_TASK_ROLE_ARN }}",
+            "containerDefinitions": [
               {
                 "name": "app",
-                "image": "'"${{ env.ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPO }}:latest"'",
+                "image": "${IMAGE_URI}",
                 "essential": true,
                 "portMappings": [
-                  { "containerPort": 3000 }
+                  { "containerPort": 3000, "protocol": "tcp" }
                 ]
               }
-            ]'
+            ]
+          }
+          JSON
+
+          TASK_DEF_ARN=$(aws ecs register-task-definition \
+            --cli-input-json file://taskdef.json \
+            --query 'taskDefinition.taskDefinitionArn' \
+            --output text)
+
+          echo "TASK_DEF_ARN=$TASK_DEF_ARN" >> "$GITHUB_ENV"
 
       - name: Update ECS service
         run: |
           aws ecs update-service \
             --cluster ${{ env.ECS_CLUSTER }} \
             --service ${{ env.ECS_SERVICE }} \
+            --task-definition "$TASK_DEF_ARN" \
             --force-new-deployment
